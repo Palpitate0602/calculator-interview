@@ -6,31 +6,67 @@ on:
     types:
       - closed # PR 关闭时触发
 
+# 同一作者的入社操作串行执行，避免两个 PR 同时重复发邀请。
+concurrency:
+  group: onboarding-${{ github.repository }}-${{ github.event.pull_request.user.id }}
+  cancel-in-progress: false
+
 jobs:
   invite:
     # 必须判断真的是合并了，才执行
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Get User ID and Invite to Org
-        env:
-          GH_TOKEN: ${{ secrets.XWMS_PAT_TOKEN }}
-        run: |
-          # 获取 PR 作者(注意: Fork PR 的作者名可能带前缀，这里直接取 login 即可)
-          USERNAME="${{ github.event.pull_request.user.login }}"
-          
-          echo "PR 已被合并，正在处理邀请 PR 作者: $USERNAME ..."
-          
-          # 获取数字 ID
-          USER_ID=$(gh api /users/$USERNAME --jq .id)
-          
-          echo "正在发送组织邀请..."
-          gh api -X POST /orgs/GXMZU-AITECC/invitations \
-            -f invitee_id="$USER_ID" \
-            -f role="direct_member"
-          
-          echo "正在将用户加入 rookies 团队..."
-          gh api -X PUT /orgs/GXMZU-AITECC/teams/rookies/memberships/$USERNAME \
-            -f role="member"
-          
-          echo "邀请已发送！"
+      - name: Invite new organization members
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.XWMS_PAT_TOKEN }}
+          script: |
+            const org = context.repo.owner;
+            const username = context.payload.pull_request.user.login;
+            const matchesUser = (item) =>
+              typeof item.login === 'string' &&
+              item.login.toLowerCase() === username.toLowerCase();
+
+            // 分页查询，不把 404、权限或网络错误当成“尚未加入”。
+            async function handleExistingUser() {
+              const members = await github.paginate(github.rest.orgs.listMembers, {
+                org, per_page: 100,
+              });
+              if (members.some(matchesUser)) {
+                core.info(`${username} 已是组织成员，跳过邀请。`);
+                return true;
+              }
+
+              const invitations = await github.paginate(
+                github.rest.orgs.listPendingInvitations,
+                { org, per_page: 100 },
+              );
+              const invitation = invitations.find(matchesUser);
+              if (invitation) {
+                core.info(`${username} 已有待接受的组织邀请，跳过重复邀请。`);
+                return true;
+              }
+              return false;
+            }
+
+            if (await handleExistingUser()) return;
+
+            const { data: user } = await github.rest.users.getByUsername({ username });
+            if (!Number.isSafeInteger(user.id) || user.id <= 0) {
+              throw new Error('用户 ID 必须是正整数，停止邀请。');
+            }
+
+            try {
+              await github.rest.orgs.createInvitation({
+                org,
+                invitee_id: user.id,
+                role: 'direct_member',
+              });
+            } catch (error) {
+              // 查询后可能有另一任务或管理员发出邀请；重新确认状态再跳过。
+              // 其他 422（参数、限流等）以及权限、网络错误继续让任务失败。
+              if (error.status === 422 && await handleExistingUser()) return;
+              throw error;
+            }
+            core.info(`已向 ${username} 发送组织邀请，等待本人接受。`);

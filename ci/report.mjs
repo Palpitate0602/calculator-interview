@@ -20,6 +20,18 @@ const runUrl = process.env.RUN_URL || '';
 const icon = (ok) => (ok === true ? '✅' : ok === false ? '❌' : '➖');
 const statusOk = (s) => (s === 'success' ? true : s === 'failure' ? false : null);
 
+/** 去掉 Playwright 等终端颜色码，避免 PR 评论备注栏乱码 */
+function stripAnsi(text) {
+  return String(text ?? '')
+    .replace(/\u001B\[[\d;]*[A-Za-z]/g, '')
+    .replace(/\u009B[\d;]*[A-Za-z]/g, '')
+    .replace(/\uFFFD\[([\d;]*)[A-Za-z]/g, '')
+    // ESC 丢失后残留的 [31m / [2m / [22m 等
+    .replace(/\[\d{1,3}(?:;\d{1,3})*m/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** 仍故意不锁、靠人工看的点 */
 const NOT_COVERED = [
   '像素级视觉回归 / 响应式布局截图对比（只锁 CSS 生效与关键选择器存在）',
@@ -53,7 +65,7 @@ function loadCases() {
         detail = 'skipped';
       } else {
         ok = false;
-        detail = last.error?.message?.split('\n')[0] || last.status;
+        detail = stripAnsi(last.error?.message?.split('\n')[0] || last.status);
       }
       cases.push({ title, ok, detail });
     }
@@ -82,7 +94,7 @@ const overall =
 const lines = [];
 lines.push(overall === true ? '## ✅ Reviewer CI 报告' : overall === false ? '## ❌ Reviewer CI 报告' : '## ➖ Reviewer CI 报告');
 lines.push('');
-lines.push('覆盖范围：**语法 + 静态前端骨架/CSS + develop 基线功能冒烟**（非像素级视觉全量）。');
+lines.push('覆盖范围：**语法 + ESLint no-undef + 静态前端骨架/CSS + Playwright 基线点击/结果冒烟（含运行期报错）**（非像素级视觉全量）。');
 lines.push(`触发口令：\`/ci\` · 仅 \`@GXMZU-AITECC/reviewers\` 可启动`);
 if (runUrl) lines.push(`完整日志：[Actions run](${runUrl})`);
 lines.push('');
@@ -91,7 +103,7 @@ lines.push('### 1. 语法与静态前端');
 lines.push('');
 lines.push(`| 项 | 结果 |`);
 lines.push(`| --- | --- |`);
-lines.push(`| HTML 骨架 / CSS 存在 / \`main.js\` 语法 / 无 CDN·import | ${icon(staticOk)} ${staticStatus} |`);
+lines.push(`| HTML/CSS/\`main.js\` 语法 · ESLint no-undef · 无 CDN·import | ${icon(staticOk)} ${staticStatus} |`);
 lines.push('');
 
 lines.push('### 2. 已跑功能与前端案例（浏览器）');
@@ -108,7 +120,9 @@ if (error) {
   lines.push('| # | 案例 | 结果 | 备注 |');
   lines.push('| --- | --- | --- | --- |');
   cases.forEach((c, i) => {
-    const note = c.detail ? c.detail.replace(/\|/g, '\\|').slice(0, 120) : '';
+    const note = c.detail
+      ? stripAnsi(c.detail).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').slice(0, 120)
+      : '';
     lines.push(`| ${i + 1} | ${c.title} | ${icon(c.ok)} | ${note} |`);
   });
   const passed = cases.filter((c) => c.ok === true).length;
